@@ -40,21 +40,25 @@ class Response:
 
         if not isinstance(from_dict, dict):
             raise ValueError("Expected type 'dict' got type '{}' ".format(type(from_dict)))
-
+        
+        ret = cls(list(from_dict.keys()), status_code)
         for key, value in from_dict.items():
             if isinstance(value, dict):
                 value = Response.from_dict(value)
-            setattr(cls, key, value)
+            if isinstance(value, list):
+                value = [Response.from_dict(v) if isinstance(v, dict) else v for v in value]
+            setattr(ret, key, value)
 
-        cls._dict = from_dict
+        ret._dict = from_dict
 
-        return cls(list(from_dict.keys()), status_code)
+        return ret
 
     def __getattr__(self, attr: str):  # Add shorthand for the payload's data
-        data = getattr(self, 'data', None)
-        if data and attr in self.data:
-            return self.data.attr
-        return self.attr
+        if attr != "data":
+            data = getattr(self, 'data', None)
+            if data is not None:
+                    return getattr(self.data, attr)
+        raise AttributeError
 
     def set_prop(self, name, value):
         for n in self.properties:

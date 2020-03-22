@@ -5,8 +5,8 @@ By: qwertyquerty and LewdNeko
 """
 
 from .activity import Activity
-from .baseclient import BaseClient
-from .client import Client, AioClient
+from .client import Client
+from .response import Response
 from .exceptions import *
 from .presence import Presence, AioPresence
 
