@@ -3,7 +3,7 @@ import json
 import os
 from typing import List
 import struct
-from queue import Queue
+from queue import Queue, Empty
 from typing import Union
 import sys
 import asyncio
@@ -22,6 +22,7 @@ class DiscordProtocol(asyncio.Protocol):
                           # we run an event handler from this dict
         self._queues = {} # map from event types to queues # functions that require a response, like get_selected_voice_channel, will enqueue a future here and await it.
                                       # once the response has arrived, the future will be called with the result
+        self._errorhandler = print
         self._connection_made_futures = []                                
 
     def register_event(self, event: str, func: callable):
@@ -50,26 +51,37 @@ class DiscordProtocol(asyncio.Protocol):
         self.logger.info("connection lost")
 
     def _message_received(self, status_code, payload):
-        if payload["evt"] is None:
-            payload["evt"] = "none"
-        evt = payload["evt"].lower()
         cmd = payload["cmd"].lower()
-        code = (cmd, evt)
-        #self.logger.debug("code %s", code)
-        if evt == 'error':
-            raise DiscordError(payload["data"]["code"], payload["data"]["message"])
+        code = cmd
+
         response = Response.from_dict(payload, status_code=status_code)
-        #self.logger.debug("received message %s", response)
+
         from_queue = None
         if code in self._queues:
-            from_queue = self._queues[code].get(block=False)
+            try:
+                from_queue = self._queues[code].get(block=False)
+            except Empty:
+                pass
+        
         if from_queue is not None:
-            from_queue.set_result(response)
-        elif evt in self._events:
-            assert cmd=="dispatch"
-            asyncio.create_task(self._events[evt](response))
+            if payload["evt"] is not None and payload["evt"].lower() == "error":
+                self.logger.error("received error payload %s", payload)
+                from_queue.set_exception(DiscordError(payload["data"]["code"], payload["data"]["message"]))
+            else:
+                from_queue.set_result(response)
+        
+        if cmd=="dispatch":
+            if payload["evt"] is None:
+                self.logger.warning("dispatch event but no evt code in %s", payload)
+                return
+            evt = payload["evt"].lower()
+            if evt in self._events:
+                asyncio.create_task(self._events[evt](response))
+            else:
+                self.logger.warning("no handler for event %s in payload %s", evt, payload)
         else:
-            self.logger.warning("no handler evt code %s in payload %s".format(evt, payload))
+            if from_queue is None:
+                self.logger.warning("no handler for message %s", payload)
 
     def data_received(self, data):
         fmt = '<II'
@@ -94,11 +106,9 @@ class DiscordProtocol(asyncio.Protocol):
         #    payload = json.loads(message)
         #    self._message_received(0, payload)
 
-    def get_response(self, cmd_code, evt_code):
-        if evt_code is None:
-            evt_code = "none"
+    def get_response(self, cmd_code):
         future = asyncio.get_running_loop().create_future()
-        code = (cmd_code.lower(), evt_code.lower())
+        code = cmd_code.lower()
         if code not in self._queues:
             self._queues[code] = Queue()
         self._queues[code].put(future, block=False)
@@ -116,13 +126,13 @@ class DiscordProtocol(asyncio.Protocol):
                 len(payload)) +
             payload.encode('utf-8'))
 
-    def send_data_and_receive_response(self, op: int, payload: Union[dict, Payload], response_evt_code=None):
+    def send_data_and_receive_response(self, op: int, payload: Union[dict, Payload]):
         if isinstance(payload, Payload):
             pl = payload.data
         else:
             pl = payload
         response_cmd_code = pl["cmd"]
-        future = self.get_response(response_cmd_code, response_evt_code)
+        future = self.get_response(response_cmd_code)
         self.send_data(op, payload)
         return future
 
@@ -156,7 +166,7 @@ class Client():
 
     async def handshake(self):
         self._protocol.send_data(0, {'v': 1, 'client_id': self.client_id})
-        data = await self._protocol.get_response("dispatch", "ready")
+        data = await self._protocol.get_response("dispatch")
         self.logger.debug("handshake complete, username is %s", data.user.username)
 
     async def authorize(self, client_id: str, scopes: List[str]):
